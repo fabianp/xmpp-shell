@@ -1,0 +1,331 @@
+#!/usr/bin/env python
+
+# .. standard library imports ..
+from __future__ import unicode_literals
+import sys, logging, getpass, os, termios, platform, threading, time, \
+    base64, select
+try:
+    import readline # not used but important for raw_input
+except ImportError:
+    pass
+try:
+    import queue
+except ImportError:
+    # python2 compat
+    import Queue as queue
+
+# .. sleekxmpp imports ..
+import sleekxmpp
+from sleekxmpp import stanza, xmlstream, exceptions
+from sleekxmpp.xmlstream import ET, handler, matcher
+
+TIMEOUT = 10 # seconds
+KEYWORDS = ('\quit',)
+
+class EntityName(xmlstream.ElementBase):
+
+    name = 'query'
+    namespace = 'xmppshell:name'
+    #plugin_attrib = 'entity_time'
+    interfaces = set(('name',))
+
+    def set_name(self, value):
+        self._set_attr('seconds', str(value))
+
+    def get_name(self):
+        return self._get_attr('name')
+
+
+class ClientShell(sleekxmpp.ClientXMPP):
+
+    def __init__(self, jid, password, daemon=False):
+        self.is_daemon = daemon
+        sleekxmpp.ClientXMPP.__init__(self, jid, password)
+
+        self.register_handler(handler.Callback(
+            'CustomXEP Handler',
+            matcher.MatchXPath('{%s}iq/{xmppshell:name}query' % self.default_ns),
+            self._handle_xmppshell_name))
+
+        self.register_handler(handler.Callback(
+            'CustomXEP Handler',
+            matcher.MatchXPath('{%s}iq/{xmppshell}query' % self.default_ns),
+            self._handle_xmppshell))
+
+
+        self.add_event_handler('session_start', self.session_start)
+        self.add_event_handler('message', self.message)
+
+
+        self.register_plugin('xep_0030') # service discovery
+        xmlstream.register_stanza_plugin(stanza.Iq, EntityName) # clearly not working
+
+        self.input_buffer = queue.Queue()
+        self.dest = None # XXX remove
+        self.ready = False
+
+    def _handle_xmppshell(self, iq):
+        #import ipdb; ipdb.set_trace()
+        data = iq.get_payload()[0].get('data')
+        s = base64.b64decode(data)
+
+        self.dest = iq.get_from() # move elsewhere
+        self.input_buffer.put(s)
+        rep = iq.reply()
+        rep.send()
+
+    def _handle_xmppshell_name(self, iq):
+        #import ipdb; ipdb.set_trace()
+        iq.reply()
+        iq._set_attr('name', platform.node())
+        user = ''
+        try:
+            user = os.getlogin()
+        except OSError:
+            try:
+                user = os.environ['LOGNAME']
+            except:
+                pass
+        iq._set_attr('user', user)
+        iq.send()
+
+    def online_servers(self):
+        """get candidates for connection"""
+        clients = self.client_roster.presence(self.boundjid.bare)
+
+        clients.pop(self.boundjid.resource, None) # remove current user
+        if not clients.keys():
+            logging.error('Nobody to connect to')
+            self.disconnect()
+            return []
+
+#        for res in clients.keys():
+#            a = self.get_machine_name(self.boundjid.bare + '/' + res)
+#            logging.info('detected server on %s' % a._get_attr('name'))
+        return clients.keys()
+
+    def session_start(self, event):
+        self.send_presence(pto=self.boundjid.bare)
+        self.ready = True
+        # XXX look at self.send_presence_subscription()
+
+
+    def write(self, c, dest, block=True):
+        if c:
+            try:
+                iq = self.make_iq_get(ito=dest)
+                payload = ET.fromstring('<query xmlns="xmppshell" data="%s"/>' % base64.encodestring(c))
+                iq.set_payload(payload)
+                iq.send(block=block)
+            except exceptions.IqError as err:
+                logging.error('There was an error transmitting')
+                logging.error(err.iq['error']['condition'])
+                self.disconnect()
+            except exceptions.IqTimeout:
+                logging.error('Server is taking too long to respond')
+                self.disconnect()
+        else:
+            self.disconnect()
+
+    def get_machine_name(self, dest):
+        # TODO: service discovery
+        try:
+            iq = self.make_iq_get(ito=dest)
+            payload = ET.fromstring('<query xmlns="xmppshell:name"/>')
+            iq.set_payload(payload)
+            resp = iq.send(block=True)
+            return resp._get_attr('name'), resp._get_attr('user')
+        except exceptions.IqError as err:
+            pass
+        except exceptions.IqTimeout:
+            logging.error('Server is taking too long to respond')
+        return '', ''
+
+    def message(self, msg):
+        if msg['type'] in ('chat', 'normal'):
+            msg.reply("Sorry, I'm just a bot").send()
+
+
+def start_server():
+
+    pid, fd = os.forkpty()
+
+    if pid == 0:
+        # .. child ..
+        sys.stdin.read(1) # wait for xmpp to connect
+        os.execl('/bin/bash', '')
+        #sys.exit(1)
+    else:
+        xmpp = ClientShell(options.user, options.password, options.server)
+
+        def t_1():
+            c = os.read(fd, 1)
+            while c:
+                # .. poll is unavailable in OSX, use select instead ..
+                # .. http://bugs.python.org/issue5154 ..
+                out, _, _ = select.select([fd], [], [], 0.)
+                while out:
+                    c += os.read(fd, 1)
+                    out, _, _ = select.select([fd], [], [], 0.)
+                sys.stdout.write(c)
+                sys.stdout.flush()
+                if xmpp.dest is not None:
+                    xmpp.write(c, xmpp.dest, block=True)
+                c = os.read(fd, 1)
+            sys.exit(1)
+
+        if not xmpp.connect((options.server, options.port)):
+            sys.exit(1)
+
+        xmpp.process(block=False)
+
+        # pipe fd into xmpp
+        t = threading.Thread(target=t_1)
+        t.daemon = True
+        t.start()
+
+        # os.write(fd, '\n')
+        # .. pipe from xmpp to fd ..
+        try:
+            c = xmpp.input_buffer.get()
+            while c:
+                os.write(fd, c)
+                c = xmpp.input_buffer.get()
+        except KeyboardInterrupt:
+            pass
+        logging.info('DISCONNECTING')
+        xmpp.disconnect()
+        sys.exit(1)
+
+def start_client():
+    old_term_info = term_info = termios.tcgetattr(sys.stdin.fileno())
+    term_info[3] &= ~ (termios.ECHO | termios.ECHOE | termios.ECHOK | termios.ECHONL)
+    term_info[3] &= ~ termios.ICANON # XXX simplify
+    term_info[2] &= ~ termios.ONLCR
+    pid, fd = os.forkpty()
+
+
+    xmpp = ClientShell(options.user, options.password, options.daemon)
+    try:
+        if xmpp.connect((options.server, options.port)):
+            # If you do not have the dnspython library installed, you will need
+            # to manually specify the name of the server if it does not match
+            # the one in the JID. For example, to use Google Talk you would
+            # need to use:
+            #
+            # if xmpp.connect(('talk.google.com', 5222)):
+            #     ...
+            xmpp.process(block=False)
+        else:
+            print("Unable to connect.")
+            sys.exit(-1)
+
+        dest = ''
+        sessions = []
+
+        while not dest:
+            for i in range(TIMEOUT):
+                if xmpp.ready:
+                    sessions = xmpp.online_servers()
+                    if sessions:
+                        break
+                time.sleep(2)
+
+            sessions_dict = dict()
+            if sessions:
+                sys.stdout.write('The following sessions are available:\n\n')
+                k = 1
+                for s in sessions:
+                    try:
+                        mn, user = xmpp.get_machine_name(xmpp.boundjid.bare + '/' + s)
+                        if user:
+                            sessions_dict[k] = s
+                            sys.stdout.write('\t %s. %s@%s\n' % (k, user, mn))
+                            k += 1
+                    except:
+                        pass
+                sys.stdout.write('\n')
+
+            else:
+                logging.error('No session found')
+                xmpp.disconnect()
+                return -1
+
+            choice = raw_input('Select server (any character to reload, enter to select 1): ')
+            if choice.lower() == 'r':
+                continue
+            elif choice == '':
+                choice = '1'
+            elif choice == 'q':
+                raise KeyboardInterrupt # exit
+
+            try:
+                dest = sessions_dict[int(choice)]
+            except:
+                # could be choice is not an integer or larger than sessions
+                sys.stdout.write('Option not available')
+
+        termios.tcsetattr(sys.stdin.fileno(), termios.TCSAFLUSH, term_info)
+        dest = xmpp.boundjid.bare + '/' + dest
+
+        # .. pipe xmpp into stdout ..
+        def t_1():
+            c = xmpp.input_buffer.get()
+            while c and c not in KEYWORDS:
+                sys.stdout.write(c)
+                sys.stdout.flush()
+                c = xmpp.input_buffer.get()
+
+        t = threading.Thread(target=t_1)
+        t.daemon = True
+        t.start()
+
+        termios.tcsetattr(sys.stdin.fileno(), termios.TCSAFLUSH, term_info)
+        xmpp.write('\n', dest)
+        stdin = sys.stdin.fileno()
+        # .. pipe stdin into xmpp ..
+
+        # TODO: buffering
+        c = os.read(stdin, 1)
+        while c:
+            xmpp.write(c, dest)
+            c = os.read(stdin, 1)
+    except KeyboardInterrupt:
+        pass
+        logging.info('RECEIVED DISCONNECT SIGNAL')
+
+    termios.tcsetattr(sys.stdin.fileno(), termios.TCSAFLUSH, old_term_info)
+    logging.info('DISCONNECTING (timeout in 5 seconds)') # TODO timeout
+    xmpp.disconnect()
+    sys.exit(1)
+
+
+if __name__ == '__main__':
+    from optparse import OptionParser
+    parser = OptionParser()
+    parser.add_option("-u", "--user", dest="user",
+        help="User name")
+    parser.add_option("-w", "--password", dest="password",
+        help="Password")
+    parser.add_option("-p", "--port", dest="port", help="Port of the server", type="int", default=5222)
+    parser.add_option("-s", "--server", dest="server", help="Connect to server")
+    parser.add_option("-d", "--daemon", dest="daemon", action="store_true", default=False)
+    parser.add_option("-v", "--verbose", dest="verbose", action="store_true", default=False)
+    options, args = parser.parse_args()
+
+    print('Started xmpp-sync. Type q to exit\n')
+    level = logging.DEBUG if options.verbose else logging.INFO
+    logging.basicConfig(level=level,
+        format='%(levelname)-8s %(message)s')
+
+    if not options.user:
+        options.user = raw_input('Username: ')
+    if not options.password:
+        passwd = getpass.getpass('Password: ')
+    if not options.server:
+        options.server = options.user.split('@')[-1]
+
+    if options.daemon:
+        start_server()
+    else:
+        start_client()
