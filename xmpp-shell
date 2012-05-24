@@ -96,7 +96,6 @@ class ClientShell(sleekxmpp.ClientXMPP):
         clients.pop(self.boundjid.resource, None) # remove current user
         if not clients.keys():
             logging.error('Nobody to connect to')
-            self.disconnect()
             return []
 
 #        for res in clients.keys():
@@ -224,7 +223,7 @@ def start_client():
         sessions = []
 
         while not dest:
-            for i in range(TIMEOUT):
+            for i in range(TIMEOUT / 2):
                 if xmpp.ready:
                     sessions = xmpp.online_servers()
                     if sessions:
@@ -236,6 +235,8 @@ def start_client():
                 sys.stdout.write('The following sessions are available:\n\n')
                 k = 1
                 for s in sessions:
+                    if s == xmpp.boundjid.resource:
+                        continue
                     try:
                         mn, user = xmpp.get_machine_name(xmpp.boundjid.bare + '/' + s)
                         if user:
