@@ -9,14 +9,14 @@ Initial stage, just proof of concept.
 Installation
 ============
 
-    $ pip install -U xmpp-shell
+TODO
 
 How to use it
 =============
 
 First launch a service in the machine you will be connecting to so that it can accept sessions::
 
-    $ xmpp-shell --server
+    $ xmpp-shell --daemon
 
 To connect to that machine call xmpp-shell without the --server flag::
 
