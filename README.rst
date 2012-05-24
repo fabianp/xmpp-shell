@@ -18,7 +18,7 @@ First launch a service in the machine you will be connecting to so that it can a
 
     $ xmpp-shell --daemon
 
-To connect to that machine call xmpp-shell without the --server flag::
+To connect to that machine call xmpp-shell without the --daemon flag::
 
     $ xmpp-shell
 
