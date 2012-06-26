@@ -33,10 +33,12 @@ an account on this server using XMPP clients such as Pidgin/Adium.
 TODO
 ====
 
+ - Wrong message when there are no servers
  - Control-C and q key (on daemon)
  - multiple sessions on the server
  - double authentication: on XMPP and on the host machine
  - Exception on wrong login (bug in sleekxmpp)
+ - add timeout to options
 
 
 Development

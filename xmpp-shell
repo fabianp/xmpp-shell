@@ -4,6 +4,7 @@
 from __future__ import unicode_literals
 import sys, logging, getpass, os, termios, platform, threading, time, \
     base64, select
+
 try:
     import readline # not used but important for raw_input
 except ImportError:
@@ -21,6 +22,16 @@ from sleekxmpp.xmlstream import ET, handler, matcher
 
 TIMEOUT = 10 # seconds
 KEYWORDS = ('\quit',)
+
+# Python versions before 3.0 do not use UTF-8 encoding
+# by default. To ensure that Unicode is handled properly
+# throughout SleekXMPP, we will set the default encoding
+# ourselves to UTF-8.
+if sys.version_info < (3, 0):
+    reload(sys)
+    sys.setdefaultencoding('utf8')
+else:
+    raw_input = input
 
 class EntityName(xmlstream.ElementBase):
 
@@ -43,12 +54,12 @@ class ClientShell(sleekxmpp.ClientXMPP):
         sleekxmpp.ClientXMPP.__init__(self, jid, password)
 
         self.register_handler(handler.Callback(
-            'CustomXEP Handler',
+            'Handle xmppshell name query',
             matcher.MatchXPath('{%s}iq/{xmppshell:name}query' % self.default_ns),
             self._handle_xmppshell_name))
 
         self.register_handler(handler.Callback(
-            'CustomXEP Handler',
+            'Handle xmpppshell query',
             matcher.MatchXPath('{%s}iq/{xmppshell}query' % self.default_ns),
             self._handle_xmppshell))
 
@@ -58,6 +69,9 @@ class ClientShell(sleekxmpp.ClientXMPP):
 
 
         self.register_plugin('xep_0030') # service discovery
+        self['xep_0030'].add_identity(category='client', itype='xmppshell')
+        self['xep_0030'].add_feature(feature='xmppshell')
+
         xmlstream.register_stanza_plugin(stanza.Iq, EntityName) # clearly not working
 
         self.input_buffer = queue.Queue()
@@ -65,7 +79,6 @@ class ClientShell(sleekxmpp.ClientXMPP):
         self.ready = False
 
     def _handle_xmppshell(self, iq):
-        #import ipdb; ipdb.set_trace()
         data = iq.get_payload()[0].get('data')
         s = base64.b64decode(data)
 
@@ -75,7 +88,6 @@ class ClientShell(sleekxmpp.ClientXMPP):
         rep.send()
 
     def _handle_xmppshell_name(self, iq):
-        #import ipdb; ipdb.set_trace()
         iq.reply()
         iq._set_attr('name', platform.node())
         user = ''
@@ -86,7 +98,8 @@ class ClientShell(sleekxmpp.ClientXMPP):
                 user = os.environ['LOGNAME']
             except:
                 pass
-        iq._set_attr('user', user)
+        if user:
+            iq._set_attr('user', user)
         iq.send()
 
     def online_servers(self):
@@ -98,10 +111,18 @@ class ClientShell(sleekxmpp.ClientXMPP):
             logging.error('Nobody to connect to')
             return []
 
-#        for res in clients.keys():
-#            a = self.get_machine_name(self.boundjid.bare + '/' + res)
-#            logging.info('detected server on %s' % a._get_attr('name'))
-        return clients.keys()
+        feasible_clients = []
+        for node in clients.keys():
+            try:
+                info = self['xep_0030'].get_info(jid=self.boundjid.bare + '/' + node, block=True)
+                if 'xmppshell' in info['disco_info']['features']:
+                    feasible_clients.append(node)
+            except exceptions.IqError as err:
+                print('Error: %s' % err.iq['error']['condition'])
+            except exceptions.IqTimeout:
+                pass
+
+        return feasible_clients
 
     def session_start(self, event):
         self.send_presence(pto=self.boundjid.bare)
@@ -231,9 +252,9 @@ def start_client():
                 time.sleep(2)
 
             sessions_dict = dict()
+            k = 1
             if sessions:
-                sys.stdout.write('The following sessions are available:\n\n')
-                k = 1
+                sys.stdout.write('The following sessions are available:\n')
                 for s in sessions:
                     if s == xmpp.boundjid.resource:
                         continue
@@ -241,18 +262,18 @@ def start_client():
                         mn, user = xmpp.get_machine_name(xmpp.boundjid.bare + '/' + s)
                         if user:
                             sessions_dict[k] = s
-                            sys.stdout.write('\t %s. %s@%s\n' % (k, user, mn))
+                            sys.stdout.write('\n\t %s. %s@%s' % (k, user, mn))
                             k += 1
                     except:
                         pass
                 sys.stdout.write('\n')
-
-            else:
+            if k == 1:
+                # this checks there are no *valid* sessions
                 logging.error('No session found')
                 xmpp.disconnect()
                 return -1
 
-            choice = raw_input('Select server (any character to reload, enter to select 1): ')
+            choice = raw_input('\nSelect server (any character to reload, enter to select 1): ')
             if choice.lower() == 'r':
                 continue
             elif choice == '':
