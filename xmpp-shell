@@ -34,18 +34,29 @@ else:
     raw_input = input
 
 class EntityName(xmlstream.ElementBase):
+    """
+    Get the username and machine name of an XMPP client
+    """
 
     name = 'query'
     namespace = 'xmppshell:name'
-    #plugin_attrib = 'entity_time'
-    interfaces = set(('name',))
+    plugin_attrib = 'entity_name'
+    interfaces = set(('name', 'user'))
 
-    def set_name(self, value):
-        self._set_attr('seconds', str(value))
+class StreamData(xmlstream.ElementBase):
+    """
+    TODO: make XML more concise
+    """
 
-    def get_name(self):
-        return self._get_attr('name')
+    name = 'query'
+    namespace = 'xmppshell:data'
+    plugin_attrib = 'stream_data'
+    interfaces = set(('data',))
+    #sub_interfaces = interfaces
 
+
+xmlstream.register_stanza_plugin(stanza.Iq, EntityName)
+xmlstream.register_stanza_plugin(stanza.Iq, StreamData)
 
 class ClientShell(sleekxmpp.ClientXMPP):
 
@@ -55,12 +66,12 @@ class ClientShell(sleekxmpp.ClientXMPP):
 
         self.register_handler(handler.Callback(
             'Handle xmppshell name query',
-            matcher.MatchXPath('{%s}iq/{xmppshell:name}query' % self.default_ns),
+            matcher.MatchXPath('{%s}iq/{%s}query' % (self.default_ns, EntityName.namespace)),
             self._handle_xmppshell_name))
 
         self.register_handler(handler.Callback(
             'Handle xmpppshell query',
-            matcher.MatchXPath('{%s}iq/{xmppshell}query' % self.default_ns),
+            matcher.MatchXPath('{%s}iq/{%s}query' % (self.default_ns, StreamData.namespace)),
             self._handle_xmppshell))
 
 
@@ -72,14 +83,12 @@ class ClientShell(sleekxmpp.ClientXMPP):
         self['xep_0030'].add_identity(category='client', itype='xmppshell')
         self['xep_0030'].add_feature(feature='xmppshell')
 
-        xmlstream.register_stanza_plugin(stanza.Iq, EntityName) # clearly not working
-
         self.input_buffer = queue.Queue()
         self.dest = None # XXX remove
         self.ready = False
 
     def _handle_xmppshell(self, iq):
-        data = iq.get_payload()[0].get('data')
+        data = iq['stream_data']['data']
         s = base64.b64decode(data)
 
         self.dest = iq.get_from() # move elsewhere
@@ -89,7 +98,7 @@ class ClientShell(sleekxmpp.ClientXMPP):
 
     def _handle_xmppshell_name(self, iq):
         iq.reply()
-        iq._set_attr('name', platform.node())
+        iq['entity_name']['name'] = platform.node()
         user = ''
         try:
             user = os.getlogin()
@@ -99,7 +108,7 @@ class ClientShell(sleekxmpp.ClientXMPP):
             except:
                 pass
         if user:
-            iq._set_attr('user', user)
+            iq['entity_name']['user'] = user
         iq.send()
 
     def online_servers(self):
@@ -134,8 +143,7 @@ class ClientShell(sleekxmpp.ClientXMPP):
         if c:
             try:
                 iq = self.make_iq_get(ito=dest)
-                payload = ET.fromstring('<query xmlns="xmppshell" data="%s"/>' % base64.encodestring(c))
-                iq.set_payload(payload)
+                iq['stream_data']['data'] = base64.encodestring(c)
                 iq.send(block=block)
             except exceptions.IqError as err:
                 logging.error('There was an error transmitting')
@@ -148,13 +156,12 @@ class ClientShell(sleekxmpp.ClientXMPP):
             self.disconnect()
 
     def get_machine_name(self, dest):
-        # TODO: service discovery
+
         try:
             iq = self.make_iq_get(ito=dest)
-            payload = ET.fromstring('<query xmlns="xmppshell:name"/>')
-            iq.set_payload(payload)
+            iq['entity_name']['name'] = None
             resp = iq.send(block=True)
-            return resp._get_attr('name'), resp._get_attr('user')
+            return resp['entity_name']['name'], resp['entity_name']['user']
         except exceptions.IqError as err:
             pass
         except exceptions.IqTimeout:
